@@ -1,0 +1,7 @@
+.env
+bootstrap
+*.exe
+vendor/
+.aws-sam/
+.DS_Store
+coverage.out

@@ -1,0 +1,84 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test & Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build Lambda binary
+        run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o bootstrap ./cmd/lambda
+
+      - name: Run tests
+        run: go test ./... -v -race -coverprofile=coverage.out
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.out
+          fail_ci_if_error: false
+
+  deploy:
+    name: Deploy to AWS
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Set up AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Build Lambda binary
+        run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-w -s" -o bootstrap ./cmd/lambda
+
+      - name: Deploy with SAM
+        run: |
+          sam deploy \
+            --template-file template.yaml \
+            --stack-name prism-app \
+            --s3-bucket prism-deploy-${{ secrets.AWS_ACCOUNT_ID }} \
+            --region us-east-1 \
+            --capabilities CAPABILITY_IAM \
+            --parameter-overrides \
+              GitHubAppID=${{ secrets.GITHUB_APP_ID_SECRET }} \
+              GitHubPrivateKey="${{ secrets.GITHUB_PRIVATE_KEY_SECRET }}" \
+              GitHubWebhookSecret=${{ secrets.GITHUB_WEBHOOK_SECRET_SECRET }} \
+              GeminiAPIKey=${{ secrets.GEMINI_API_KEY }} \
+            --no-fail-on-empty-changeset

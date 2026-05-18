@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: PRism - AI-Powered Code Review GitHub App
+
+Parameters:
+  GitHubAppID:
+    Type: String
+    Description: GitHub App ID
+  GitHubPrivateKey:
+    Type: String
+    NoEcho: true
+    Description: GitHub App Private Key (PEM format with \n escapes)
+  GitHubWebhookSecret:
+    Type: String
+    NoEcho: true
+    Description: GitHub Webhook Secret
+  GeminiAPIKey:
+    Type: String
+    NoEcho: true
+    Description: Google Gemini API Key
+
+Globals:
+  Function:
+    Timeout: 300       # 5 minutes — enough for multi-file reviews
+    MemorySize: 256    # MB — Go binaries are lean
+    Runtime: provided.al2023
+    Architectures: [arm64]  # Graviton2 — 20% cheaper and faster than x86 on Lambda
+
+Resources:
+  # ---- Lambda Function ----
+  PRismFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: prism-webhook-handler
+      CodeUri: .
+      Handler: bootstrap
+      Description: Handles GitHub webhook events and runs AI code reviews
+      Environment:
+        Variables:
+          GITHUB_APP_ID: !Ref GitHubAppID
+          GITHUB_PRIVATE_KEY: !Ref GitHubPrivateKey
+          GITHUB_WEBHOOK_SECRET: !Ref GitHubWebhookSecret
+          GEMINI_API_KEY: !Ref GeminiAPIKey
+          DYNAMODB_TABLE: !Ref ReviewsTable
+          AWS_REGION_NAME: !Ref AWS::Region
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReviewsTable
+      Events:
+        WebhookAPI:
+          Type: Api
+          Properties:
+            Path: /webhook
+            Method: POST
+            RestApiId: !Ref PRismAPI
+
+  # ---- API Gateway ----
+  PRismAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: prism-api
+      StageName: prod
+      Description: PRism webhook receiver
+
+  # ---- DynamoDB Table ----
+  ReviewsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: prism-reviews
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: owner
+          AttributeType: S
+        - AttributeName: repo
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: repo-index
+          KeySchema:
+            - AttributeName: owner
+              KeyType: HASH
+            - AttributeName: repo
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+Outputs:
+  WebhookURL:
+    Description: Paste this URL into your GitHub App webhook settings
+    Value: !Sub "https://${PRismAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/webhook"
+  FunctionName:
+    Description: Lambda function name
+    Value: !Ref PRismFunction
